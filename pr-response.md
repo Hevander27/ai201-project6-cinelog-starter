@@ -180,6 +180,54 @@ full test suite passes (7 passed) with UUIDs throughout — including the watchl
 add, deduplication, nonexistent-film, and both sort paths — and a `grep` for
 `Integer`/`<int>` in the watchlist code returns only the explanatory comment.
 
+## Stretch Features
+
+### 1. `remove_from_watchlist()`
+**What I built:** `remove_from_watchlist(user_id, film_id)` in
+`services/watchlist_service.py`, following the project's existing patterns rather
+than inventing my own: the same `verb_to_noun` name as `remove_from_collection()`,
+the same shape (look the entry up with `filter_by(user_id, film_id).first()`,
+raise a specific error if it's absent, otherwise delete and return `True`), and a
+matching `NotInWatchlistError` exception parallel to `NotInCollectionError`. It's
+exposed as `DELETE /watchlist/<user_id>/remove`, returning **200** on success and
+**404** when the film isn't on the list — mirroring the collection's remove
+endpoint, including the "film_id is required" 400 guard.
+
+**Tests:** `test_remove_from_watchlist_removes_entry` (entry is deleted, returns
+`True`) and `test_remove_from_watchlist_not_present_raises` (raises
+`NotInWatchlistError`).
+
+### 2. Second test — deduplication and user isolation
+The review only asked for one test (nonexistent `film_id`). I added two it didn't
+ask for:
+
+- **`test_add_to_watchlist_duplicate_raises`** — *why this case:* Comment 2 asked
+  me to **fix** duplicate handling but never asked for a test of it. An untested
+  fix is one refactor away from silently regressing, and this failure mode is
+  invisible — a duplicate row, not a crash. The test asserts both that
+  `AlreadyInWatchlistError` is raised **and** that exactly one row persists; the
+  count assertion is the part that would actually catch a regression, since a
+  broken dedup check could still raise for the wrong reason.
+- **`test_get_watchlist_only_returns_requested_users_entries`** — *why this case:*
+  it's the highest-consequence bug this feature could have. Because I argued
+  watchlists should stay **public by default** (Comment 4), a filtering mistake in
+  `get_watchlist()` wouldn't just show wrong data — it would leak one user's list
+  into another's. I deliberately gave both users the *same* film, since a naive
+  test with different films would pass even if the filter were dropped.
+
+### 3. Visibility toggle
+**What I built:** `add_to_watchlist(user_id, film_id, public=True)` now takes an
+explicit `public` parameter, plumbed through the endpoint as an optional body
+field — `POST /watchlist/<user_id>/add` with `{"film_id": "...", "public": false}`.
+Omitting it preserves the documented default (`True`).
+
+**Why it matters here:** this is the concrete mitigation I promised in my Comment 4
+answer. My position was "public by default, **but never silently**" — that argument
+only holds up if callers can set visibility deliberately at creation time instead
+of discovering the default after the fact. Tests cover both paths:
+`test_add_to_watchlist_defaults_to_public` and
+`test_add_to_watchlist_respects_explicit_public_false`.
+
 ## Commit History
 
 `git log --oneline` on `feature/watchlist` after the interactive history rewrite —
@@ -187,13 +235,20 @@ six conventional commits, one logical change each, **no merge commits**, all
 rebased on top of `origin/main`:
 
 ```
-dd1f7dc docs: add pr-response.md with review responses and design decisions
+93ce6c2 docs: document stretch features in pr-response.md
+4e24e75 test: add watchlist tests for removal, deduplication, isolation, and visibility
+311773c feat: add public parameter to add_to_watchlist for explicit visibility
+3a1a23c feat: add remove_from_watchlist service and DELETE endpoint
+8c314e8 docs: add pr-response.md with review responses and design decisions
 5b470ca test: add watchlist tests for nonexistent film and sort order
 d3ba03f feat: add watchlist endpoints with 404 and 409 error handling
 3acdb25 feat: add watchlist service with deduplication and configurable sort order
 c55cd26 feat: add WatchlistEntry model with UUID film reference
 93a98bc fix: replace deprecated Query.get with db.session.get in collection service
 ```
+
+(The first six commits address the review; the last four are the stretch
+features.)
 
 Verified with `git log --merges origin/main..HEAD` (empty — no merge commits) and
 `git merge-base --is-ancestor origin/main HEAD` (branch sits directly on `main`).
@@ -217,8 +272,14 @@ their collection (films already watched). It introduces:
 - **`get_watchlist(user_id, sort="recent")`** — returns the user's watchlist,
   ordered by date added (newest first) by default, or alphabetically with
   `sort="title"`.
-- **Endpoints** — `POST /watchlist/<user_id>/add` (201, or 404 for an unknown
-  film / 409 for a duplicate) and `GET /watchlist/<user_id>?sort=recent|title`.
+- **`remove_from_watchlist(user_id, film_id)`** *(stretch)* — deletes an entry, or
+  raises `NotInWatchlistError` if it isn't there.
+- **Endpoints** — `POST /watchlist/<user_id>/add` (201; 404 unknown film; 409
+  duplicate), `GET /watchlist/<user_id>?sort=recent|title`, and
+  `DELETE /watchlist/<user_id>/remove` (200; 404 if not on the list).
+- **Explicit visibility** *(stretch)* — `add_to_watchlist` accepts a `public`
+  parameter (optional `"public"` body field) so callers can set visibility
+  deliberately instead of relying on the default.
 
 ### Design decisions
 1. **Default visibility — watchlists stay public by default (`public=True`).**
@@ -266,6 +327,16 @@ curl -s http://127.0.0.1:5000/watchlist/<USER_UUID> | python -m json.tool
 # 7. View it alphabetically (add 2+ films first to see the difference)
 curl -s "http://127.0.0.1:5000/watchlist/<USER_UUID>?sort=title" | python -m json.tool
 
-# 8. Run the automated tests
-pytest tests/ -v                   # 7 passed
+# 8. (Stretch) Add a film as PRIVATE -> response shows "public": false
+curl -s -X POST http://127.0.0.1:5000/watchlist/<USER_UUID>/add \
+  -H "Content-Type: application/json" \
+  -d '{"film_id": "<FILM_UUID_2>", "public": false}' | python -m json.tool
+
+# 9. (Stretch) Remove a film -> expect 200; removing it again -> expect 404
+curl -s -X DELETE http://127.0.0.1:5000/watchlist/<USER_UUID>/remove \
+  -H "Content-Type: application/json" \
+  -d '{"film_id": "<FILM_UUID>"}'
+
+# 10. Run the automated tests
+pytest tests/ -v                   # 13 passed
 ```
